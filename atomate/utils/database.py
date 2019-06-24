@@ -25,13 +25,18 @@ logger = get_logger(__name__)
 
 class CalcDb(six.with_metaclass(ABCMeta)):
 
-    def __init__(self, host, port, database, collection, user, password, **kwargs):
+    def __init__(self, host, port, database, collection, user, password,
+                counter_label="task_id"):
         self.host = host
         self.db_name = database
         self.user = user
         self.password = password
         self.port = int(port)
 
+        # this is for historical, backwards-compatible reasons
+        # due to "task_id" and "taskid" being used in existing databases
+        # (we know this makes no sense, sorry!)
+        self.counter_label_no_underscore = counter_label.replace("_", "")
         try:
             self.connection = MongoClient(host=self.host, port=self.port,
                                           username=self.user,
@@ -49,8 +54,8 @@ class CalcDb(six.with_metaclass(ABCMeta)):
         self.collection = self.db[collection]
 
         # set counter collection
-        if self.db.counter.find({"_id": "taskid"}).count() == 0:
-            self.db.counter.insert_one({"_id": "taskid", "c": 0})
+        if self.db.counter.find({"_id": self.counter_label_no_underscore}).count() == 0:
+            self.db.counter.insert_one({"_id": self.counter_label_no_underscore, "c": 0})
             self.build_indexes()
 
     @abstractmethod
@@ -72,22 +77,27 @@ class CalcDb(six.with_metaclass(ABCMeta)):
             d (dict): task document
             update_duplicates (bool): whether to update the duplicates
         """
-        result = self.collection.find_one({"dir_name": d["dir_name"]}, ["dir_name", "task_id"])
+        result = self.collection.find_one({"dir_name": d["dir_name"]},
+                                          ["dir_name", self.counter_label])
         if result is None or update_duplicates:
             d["last_updated"] = datetime.datetime.utcnow()
             if result is None:
-                if ("task_id" not in d) or (not d["task_id"]):
-                    d["task_id"] = self.db.counter.find_one_and_update(
-                        {"_id": "taskid"}, {"$inc": {"c": 1}},
+                if (self.counter_label not in d) or (not d[self.counter_label]):
+                    d[self.counter_label] = self.db.counter.find_one_and_update(
+                        {"_id": self.counter_label_no_underscore}, {"$inc": {"c": 1}},
                         return_document=ReturnDocument.AFTER)["c"]
-                logger.info("Inserting {} with taskid = {}".format(d["dir_name"], d["task_id"]))
+                logger.info("Inserting {} with {} = {}".format(d["dir_name"],
+                                                               self.counter_label_no_underscore,
+                                                               d["task_id"]))
             elif update_duplicates:
-                d["task_id"] = result["task_id"]
-                logger.info("Updating {} with taskid = {}".format(d["dir_name"], d["task_id"]))
+                d[self.counter_label] = result[self.counter_label]
+                logger.info("Updating {} with {} = {}".format(d["dir_name"],
+                                                              self.counter_label_no_underscore,
+                                                              d["task_id"]))
             d = jsanitize(d, allow_bson=True)
             self.collection.update_one({"dir_name": d["dir_name"]},
                                        {"$set": d}, upsert=True)
-            return d["task_id"]
+            return d[self.counter_label]
         else:
             logger.info("Skipping duplicate {}".format(d["dir_name"]))
             return None
